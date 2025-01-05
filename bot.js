@@ -4,6 +4,9 @@ const axios = require('axios');
 const FormData = require('form-data');
 const config = require('./config');
 
+// Initialize Google AI
+const genAI = config.genAI;
+
 // Simple in-memory session store (consider using Redis for production)
 const userSessions = new Map();
 
@@ -12,7 +15,8 @@ const STATES = {
   IDLE: 'IDLE',
   WAITING_FOR_PLANT_NAME: 'WAITING_FOR_PLANT_NAME',
   WAITING_FOR_IMAGE: 'WAITING_FOR_IMAGE',
-  WAITING_FOR_LOCATION: 'WAITING_FOR_LOCATION'
+  WAITING_FOR_LOCATION: 'WAITING_FOR_LOCATION',
+  WAITING_FOR_PHONE: 'WAITING_FOR_PHONE'
 };
 
 // Initialize the bot with the token from config
@@ -22,7 +26,7 @@ const bot = new TelegramBot(config.TELEGRAM_BOT_TOKEN, { polling: true });
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
   initSession(chatId);
-  askForPlantName(chatId);
+  askForPhone(chatId);
 });
 
 // Cancel command handler
@@ -39,6 +43,16 @@ bot.on('message', async (msg) => {
 
   try {
     switch (session.state) {
+      case STATES.IDLE:
+        if (msg.contact && msg.contact.phone_number) {
+          session.phoneNumber = msg.contact.phone_number;
+          session.state = STATES.WAITING_FOR_PLANT_NAME;
+          await askForPlantName(chatId);
+        } else if (!msg.contact && msg.text !== '/cancel') {
+          await bot.sendMessage(chatId, 'Please use the button to share your phone number.');
+        }
+        break;
+
       case STATES.WAITING_FOR_PLANT_NAME:
         if (msg.text && msg.text !== '/start' && msg.text !== '/cancel') {
           session.plantName = msg.text;
@@ -78,6 +92,7 @@ bot.on('message', async (msg) => {
 function initSession(chatId) {
   const session = {
     state: STATES.IDLE,
+    phoneNumber: null,
     plantName: null,
     imageUrl: null,
     imageAnalysis: null,
@@ -117,8 +132,27 @@ async function askForLocation(chatId) {
   
   await bot.sendMessage(
     chatId,
-    'Thanks! Now please share the location where this plant is growing.',
+    'Please share the location where this plant is growing.',
     locationKeyboard
+  );
+}
+
+async function askForPhone(chatId) {
+  const phoneKeyboard = {
+    reply_markup: {
+      keyboard: [[{
+        text: '📱 Share Phone Number',
+        request_contact: true
+      }]],
+      resize_keyboard: true,
+      one_time_keyboard: true
+    }
+  };
+  
+  await bot.sendMessage(
+    chatId,
+    'Please share your phone number to get started.',
+    phoneKeyboard
   );
 }
 
@@ -126,15 +160,25 @@ async function handlePhoto(msg, session) {
   const photo = msg.photo[msg.photo.length - 1];
   const file = await bot.getFile(photo.file_id);
   const imageUrl = `https://api.telegram.org/file/bot${bot.token}/${file.file_path}`;
-
-  // Download image from Telegram
   const response = await axios.get(imageUrl, { responseType: 'arraybuffer' });
   
-  // Create form data for Strapi upload
-  const formData = new FormData();
-  formData.append('files', new Blob([response.data], { type: 'image/jpeg' }), `${session.plantName}_${photo.file_id}.jpg`);
+  // Generate a shorter, sanitized filename
+  const timestamp = Date.now();
+  const sanitizedPlantName = session.plantName
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '_')
+    .substring(0, 30);
+  const filename = `${sanitizedPlantName}_${timestamp}.jpg`;
 
-  // Upload to Strapi
+  const formData = new FormData();
+  formData.append('files', Buffer.from(response.data), {
+    filename: filename,
+    contentType: 'image/jpeg',
+  });
+  formData.append('folder', 'plants');
+
+  console.log('Uploading file:', filename, 'to folder: plants');
+  
   try {
     const uploadResponse = await axios.post(
       `${config.STRAPI_CONFIG.apiUrl}/api/upload`,
@@ -142,31 +186,60 @@ async function handlePhoto(msg, session) {
       {
         headers: {
           'Authorization': `Bearer ${config.STRAPI_CONFIG.apiToken}`,
-          'Content-Type': 'multipart/form-data'
+          ...formData.getHeaders()
         }
       }
     );
 
-    // Get the URL from Strapi's response
-    const uploadedFile = uploadResponse.data[0];
-    session.imageUrl = uploadedFile.url;
+    if (!uploadResponse.data || !Array.isArray(uploadResponse.data)) {
+      throw new Error('Invalid upload response from Strapi');
+    }
 
-    // Analyze with Gemini
-    const model = genAI.getGenerativeModel({ model: 'gemini-pro-vision' });
+    const uploadedFile = uploadResponse.data[0];
+    if (!uploadedFile || !uploadedFile.id) {
+      throw new Error('No file ID received from Strapi');
+    }
+
+    console.log('File successfully uploaded with ID:', uploadedFile.id);
+    session.imageId = uploadedFile.id;
+
+    // Start image analysis in the background
+    analyzeImage(msg.chat.id, session, uploadedFile.url).catch(error => {
+      console.error('Image analysis error:', error);
+      bot.sendMessage(msg.chat.id, 'Note: There was an error analyzing your image, but we\'ll continue with the location.');
+    });
+
+    // Set state and ask for location only once
+    session.state = STATES.WAITING_FOR_LOCATION;
+    await askForLocation(msg.chat.id);
+
+  } catch (error) {
+    console.error('Detailed upload error:', {
+      message: error.message,
+      response: error.response?.data,
+      status: error.response?.status
+    });
+    throw new Error(`Failed to upload image: ${error.message}`);
+  }
+}
+
+// New separate function for image analysis
+async function analyzeImage(chatId, session, imageUrl) {
+  try {
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
     const result = await model.generateContent([
-      session.imageUrl,
-      `Analyze this image of a plant named "${session.plantName}". ` +
-      'Provide details about its appearance and health.'
+      imageUrl,
+      'Briefly describe this image in 2-3 short sentences. Focus only on what you can see in the image.'
     ]);
     const aiResponse = await result.response;
-
-    // Save analysis to session
     session.imageAnalysis = aiResponse.text();
-
-    await bot.sendMessage(msg.chat.id, 'Photo received and analyzed! Now I need the location.');
+    
+    // Notify user that analysis is complete
+    await bot.sendMessage(chatId, 'Image analysis complete! I\'ll include it in the final summary.');
   } catch (error) {
-    console.error('Error uploading to Strapi:', error.response?.data || error.message);
-    throw new Error('Failed to upload image');
+    console.error('Analysis error:', error);
+    session.imageAnalysis = 'Image analysis failed';
+    throw error;
   }
 }
 
@@ -177,11 +250,12 @@ async function handleLocation(msg, session) {
   // Save to Strapi
   await saveToStrapi({
     plantName: session.plantName,
-    imageUrl: session.imageUrl,
-    analysis: session.imageAnalysis,
+    imageId: session.imageId,
+    imageAnalysis: session.imageAnalysis,
     latitude,
     longitude,
-    userId: msg.from.id
+    userId: msg.from.id,
+    phoneNumber: session.phoneNumber
   });
 }
 
@@ -203,15 +277,16 @@ async function sendSummary(chatId, session) {
 async function saveToStrapi(data) {
   try {
     const response = await axios.post(
-      `${config.STRAPI_CONFIG.apiUrl}/api/plants`,
+      `${config.STRAPI_CONFIG.apiUrl}/api/location-trackings`,
       {
         data: {
-          name: data.plantName,
-          image_url: data.imageUrl,
+          label: data.plantName,
+          plant_image: data.imageId,
           analysis: data.imageAnalysis,
           latitude: data.latitude,
           longitude: data.longitude,
-          telegram_user_id: data.userId.toString()
+          last_verified: new Date().toISOString(),
+          phone_number: data.phoneNumber
         }
       },
       {
