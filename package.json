@@ -4,15 +4,19 @@
   "description": "Telegram bot for tracking plants",
   "main": "bot.js",
   "scripts": {
+    "start": "node --trace-warnings --unhandled-rejections=strict bot.js",
+    "start:local": "NODE_ENV=development node --trace-warnings --unhandled-rejections=strict bot.js",
+    "deploy": "flyctl deploy --remote-only",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@google/generative-ai": "^0.21.0",
-    "axios": "^1.7.9",
+    "@google/generative-ai": "^0.2.0",
+    "axios": "^1.6.0",
     "dotenv": "^16.4.7",
+    "express": "^4.21.2",
     "form-data": "^4.0.0",
-    "node-telegram-bot-api": "^0.66.0"
+    "node-telegram-bot-api": "^0.64.0"
   }
 }
