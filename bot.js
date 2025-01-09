@@ -25,6 +25,9 @@ const app = express();
 const PORT = 8080;
 const HOST = '0.0.0.0';
 
+// Add JSON parsing middleware
+app.use(express.json());
+
 // Initialize Google AI
 const genAI = config.genAI;
 
@@ -88,23 +91,21 @@ console.log('Running in', isProd ? 'production' : 'development', 'mode');
 
 function startBot() {
   console.log('Bot starting...');
-  const botConfig = {
-    // Use webhooks in production, polling in development
-    ...(isProd ? {
-      webHook: {
-        port: 8080
-      }
-    } : {
-      polling: true
-    })
-  };
-
+  const botConfig = isProd ? {} : { polling: true };  // No webHook config needed
+  
   const bot = new TelegramBot(config.TELEGRAM_BOT_TOKEN, botConfig);
   console.log('Bot initialized with', isProd ? 'webhook' : 'polling');
 
   if (isProd) {
     // Set webhook only in production
     const webhookUrl = `https://steward-plant-bot.fly.dev/${config.TELEGRAM_BOT_TOKEN}`;
+    
+    // Add webhook route before setting the webhook
+    app.post(`/${config.TELEGRAM_BOT_TOKEN}`, (req, res) => {
+      bot.handleUpdate(req.body);
+      res.sendStatus(200);
+    });
+
     bot.setWebHook(webhookUrl).then(() => {
       console.log('Webhook set to:', webhookUrl);
     });

@@ -23,7 +23,7 @@ swap_size_mb = 512
   processes = ["app"]
 
 [[http_service.checks]]
-  grace_period = "20s"
+  grace_period = "10s"
   interval = "30s"
   method = "GET"
   timeout = "5s"
@@ -33,3 +33,17 @@ swap_size_mb = 512
   memory = '1gb'
   cpu_kind = 'shared'
   cpus = 1
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 8080
+  processes = ["app"]
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+    force_https = true
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
