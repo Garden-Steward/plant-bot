@@ -19,14 +19,19 @@ console.log('Application starting...');
 console.log('Environment:', process.env.NODE_ENV);
 console.log('Server Port:', 8080);
 
+// Move isProd declaration to the top, after the initial console.logs
+const isProd = process.env.NODE_ENV === 'production';
+console.log('Running in', isProd ? 'production' : 'development', 'mode');
+
 // Initialize Express first
 const express = require('express');
 const app = express();
 const PORT = 8080;
 const HOST = '0.0.0.0';
 
-// Add JSON parsing middleware
+// Add JSON parsing middleware BEFORE routes
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // Initialize Google AI
 const genAI = config.genAI;
@@ -46,18 +51,32 @@ const STATES = {
   WAITING_FOR_PHONE: 'WAITING_FOR_PHONE'
 };
 
+
+// Add at the top level, after middleware setup
+app.use((req, res, next) => {
+  console.log('Incoming request:', {
+    method: req.method,
+    path: req.path,
+    body: req.body,
+    headers: req.headers
+  });
+  next();
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   console.log(`Health check received on port ${PORT}`);
   res.status(200).send('OK');
 });
 
+// Move bot initialization after isProd is defined
+const bot = startBot();
+
 // Start Express with more detailed logging
 const server = app.listen(PORT, HOST, () => {
   console.log(`Server started and listening on http://${HOST}:${PORT}`);
   console.log(`Health check available at http://${HOST}:${PORT}/health`);
   console.log('Starting bot...');
-  startBot();
 }).on('error', (error) => {
   console.error(`Express Server Error on port ${PORT}:`, error);
 });
@@ -79,36 +98,76 @@ process.on('SIGINT', () => {
   });
 });
 
-// Add a catch-all route
+// Add catch-all route LAST, after server is started
 app.use((req, res) => {
-  console.log('Received request:', req.method, req.url);
+  console.log('❌ 404 - Not Found:', {
+    method: req.method,
+    path: req.path,
+    body: req.body
+  });
   res.status(404).send('Not Found');
 });
 
-// Near the top of your file
-const isProd = process.env.NODE_ENV === 'production';
-console.log('Running in', isProd ? 'production' : 'development', 'mode');
-
 function startBot() {
   console.log('Bot starting...');
-  const botConfig = isProd ? {} : { polling: true };  // No webHook config needed
-  
+  const botConfig = isProd ? {} : { polling: true };
   const bot = new TelegramBot(config.TELEGRAM_BOT_TOKEN, botConfig);
   console.log('Bot initialized with', isProd ? 'webhook' : 'polling');
 
   if (isProd) {
-    // Set webhook only in production
-    const webhookUrl = `https://steward-plant-bot.fly.dev/${config.TELEGRAM_BOT_TOKEN}`;
+    console.log('Bot instance check:', {
+      hasProcessUpdate: typeof bot.processUpdate === 'function',
+      botToken: !!bot.token, // Will log true/false for token presence
+    });
     
-    // Add webhook route before setting the webhook
-    app.post(`/${config.TELEGRAM_BOT_TOKEN}`, (req, res) => {
-      bot.handleUpdate(req.body);
-      res.sendStatus(200);
+    // Define webhook path
+    const webhookPath = `/${config.TELEGRAM_BOT_TOKEN}`;
+    const webhookUrl = `https://steward-plant-bot.fly.dev${webhookPath}`;
+    
+    // Log all registered routes
+    console.log('Current Express routes:');
+    app._router.stack.forEach(r => {
+      if (r.route && r.route.path) {
+        console.log(r.route.path);
+      }
     });
 
-    bot.setWebHook(webhookUrl).then(() => {
-      console.log('Webhook set to:', webhookUrl);
+    // Add webhook route with explicit logging
+    console.log('Registering webhook route:', webhookPath);
+    app.post(webhookPath, (req, res) => {
+      console.log('⚡️ Webhook hit:', {
+        path: req.path,
+        body: JSON.stringify(req.body, null, 2)
+      });
+      
+      try {
+        bot.processUpdate(req.body);
+        console.log('✅ Update handled successfully');
+        res.sendStatus(200);
+      } catch (error) {
+        console.error('❌ Error handling webhook:', error);
+        res.sendStatus(500);
+      }
     });
+
+    // Delete and set webhook with better error handling
+    (async () => {
+      try {
+        console.log('Deleting old webhook...');
+        await bot.deleteWebHook();
+        console.log('Old webhook deleted');
+        
+        console.log('Setting new webhook to:', webhookUrl);
+        const result = await bot.setWebHook(webhookUrl);
+        console.log('Webhook set result:', result);
+        
+        // Verify webhook
+        const webhookInfo = await bot.getWebhookInfo();
+        console.log('Webhook info:', webhookInfo);
+      } catch (error) {
+        console.error('Failed to setup webhook:', error);
+      }
+    })();
   }
 
   // Add error handler for the bot
@@ -487,4 +546,5 @@ function startBot() {
     console.error('Polling error:', error);
   });
 
+  return bot;  // Return the bot instance
 }
