@@ -9,10 +9,17 @@ process.on('unhandledRejection', (error) => {
 });
 
 const TelegramBot = require('node-telegram-bot-api');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-const axios = require('axios');
-const FormData = require('form-data');
 const config = require('./config');
+const { 
+  analyzeImage, 
+  saveToStrapi, 
+  initSession, 
+  sendSummary,
+  handlePhotoUpload,
+  findUserByChatId,
+  findUserByPhone,
+  updateUserChatId
+} = require('./helpers/botHelpers');
 
 // At the top after requires
 console.log('Application starting...');
@@ -179,67 +186,76 @@ function startBot() {
     console.error('Polling error:', error);
   });
 
-  // [Paste all your original bot code here, starting from the initSession function]
-  function initSession(chatId) {
-    console.log(`Attempting to initialize/get session for chatId: ${chatId}`);
-    
-    // Check if session already exists
-    if (userSessions.has(chatId)) {
-      console.log(`Session already exists for chatId: ${chatId}`, {
-        state: userSessions.get(chatId).state
-      });
-      return userSessions.get(chatId);
-    }
-
-    console.log('Creating new session for chatId:', chatId);
-    const session = {
-      state: STATES.IDLE,
-      phoneNumber: null,
-      plantName: null,
-      imageUrl: null,
-      imageAnalysis: null,
-      location: null
-    };
-    userSessions.set(chatId, session);
-    return session;
-  }
-
-  // [Paste the rest of your original bot code here, including all handlers and helper functions]
-  // Start command handler
   bot.onText(/\/start/, async (msg) => {
     console.log('Received /start command from:', msg.chat.id);
     const chatId = msg.chat.id;
-    initSession(chatId);
+    const session = initSession(chatId, userSessions, STATES);
     
-    // Check if we already have the user's phone number
-    if (userPhoneNumbers.has(chatId)) {
-      console.log(`Found existing phone number for chatId: ${chatId}`);
-      const phoneNumber = userPhoneNumbers.get(chatId);
-      const session = userSessions.get(chatId);
-      session.phoneNumber = phoneNumber;
-      session.state = STATES.WAITING_FOR_PLANT_NAME;
-      await askForPlantName(chatId);
-    } else {
-      console.log(`No phone number found for chatId: ${chatId}, asking for phone`);
-      await askForPhone(chatId);
+    try {
+      // Check if user exists in Strapi
+      const existingUser = await findUserByChatId(chatId);
+      
+      if (existingUser) {
+        console.log(`Found existing user for chatId: ${chatId}`);
+        session.phoneNumber = existingUser.phoneNumber;
+        session.userId = existingUser.id;
+        session.state = STATES.WAITING_FOR_PLANT_NAME;
+        await askForPlantName(chatId);
+      } else {
+        console.log(`No user found for chatId: ${chatId}, asking for phone`);
+        await askForPhone(chatId);
+      }
+    } catch (error) {
+      console.error('Error checking user:', error);
+      await bot.sendMessage(chatId, 'An error occurred. Please try again later.');
     }
   });
 
   // Message handler
   bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
-    const session = userSessions.get(chatId) || initSession(chatId);
+    const session = userSessions.get(chatId) || initSession(chatId, userSessions, STATES);
 
     try {
       // console.log(`Processing message in state: ${session.state}`);
       switch (session.state) {
         case STATES.IDLE:
           if (msg.contact && msg.contact.phone_number) {
-            session.phoneNumber = msg.contact.phone_number;
-            // Store the phone number for future use
-            userPhoneNumbers.set(chatId, msg.contact.phone_number);
-            session.state = STATES.WAITING_FOR_PLANT_NAME;
-            await askForPlantName(chatId);
+            try {
+              // Format phone number to ensure it has country code
+              const phoneNumber = msg.contact.phone_number.startsWith('+') 
+                ? msg.contact.phone_number 
+                : `+${msg.contact.phone_number}`;
+              
+              // Look up user by phone number
+              const existingUser = await findUserByPhone(phoneNumber);
+              
+              if (existingUser) {
+                console.log(`Found existing user with phone: ${phoneNumber}`);
+                
+                // Update the user's chatId
+                try {
+                  await updateUserChatId(existingUser.id, chatId);
+                  console.log(`Updated chatId for user: ${existingUser.id}`);
+                } catch (updateError) {
+                  console.error('Failed to update chatId:', updateError);
+                  // Continue with the flow even if update fails
+                }
+                
+                session.phoneNumber = phoneNumber;
+                session.userId = existingUser.id;  // Store userId in session
+                session.state = STATES.WAITING_FOR_PLANT_NAME;
+                await askForPlantName(chatId);
+              } else {
+                console.log(`No user found with phone: ${phoneNumber}`);
+                await bot.sendMessage(chatId, 'Sorry, I couldn\'t find your account. Please contact support.');
+                session.state = STATES.IDLE;
+              }
+            } catch (error) {
+              console.error('Error processing phone number:', error);
+              await bot.sendMessage(chatId, 'An error occurred. Please try /start again.');
+              session.state = STATES.IDLE;
+            }
           }
           break;
 
@@ -253,7 +269,11 @@ function startBot() {
 
         case STATES.WAITING_FOR_IMAGE:
           if (msg.photo) {
-            await handlePhoto(msg, session);
+            const { fileId, fileUrl } = await handlePhotoUpload(msg, session, bot, config);
+            session.imageId = fileId;
+            await analyzeImage(session, fileUrl);
+            session.state = STATES.WAITING_FOR_LOCATION;
+            await askForLocation(chatId);
           } else if (msg.text !== '/cancel') {
             await bot.sendMessage(chatId, 'Please send a photo of the plant.');
           }
@@ -262,8 +282,7 @@ function startBot() {
         case STATES.WAITING_FOR_LOCATION:
           if (msg.location) {
             await handleLocation(msg, session);
-            await sendSummary(chatId, session);
-            initSession(chatId);
+            await sendSummary(bot, chatId, session);
           } else if (msg.text !== '/cancel') {
             await askForLocation(chatId);
           }
@@ -280,7 +299,7 @@ function startBot() {
     
     switch (query.data) {
       case 'add_plant':
-        initSession(chatId);
+        initSession(chatId, userSessions, STATES);
         askForPhone(chatId);
         break;
       case 'view_map':
@@ -339,201 +358,37 @@ function startBot() {
         one_time_keyboard: true
       }
     };
-    
     await bot.sendMessage(
       chatId,
-      'Please share your phone number to get started.',
+      'Please share your phone number to get started. Minimizing the keyboard will give you a share button',
       phoneKeyboard
     );
-  }
-
-  // Add this new function to create a menu with multiple options
-  async function showMainMenu(chatId) {
-    const keyboard = {
-      reply_markup: {
-        keyboard: [
-          ['🌿 Document New Plant'],
-          ['🗺️ View My Plants'],
-          ['ℹ️ Help']
-        ],
-        resize_keyboard: true
-      }
-    };
-
-    await bot.sendMessage(
-      chatId,
-      'What would you like to do?',
-      keyboard
-    );
-  }
-
-  async function handlePhoto(msg, session) {
-    const photo = msg.photo[msg.photo.length - 1];
-    const file = await bot.getFile(photo.file_id);
-    const imageUrl = `https://api.telegram.org/file/bot${bot.token}/${file.file_path}`;
-    const response = await axios.get(imageUrl, { responseType: 'arraybuffer' });
-    
-    // Generate a shorter, sanitized filename
-    const timestamp = Date.now();
-    const sanitizedPlantName = session.plantName
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, '_')
-      .substring(0, 30);
-    const filename = `${sanitizedPlantName}_${timestamp}.jpg`;
-
-    const formData = new FormData();
-    formData.append('files', Buffer.from(response.data), {
-      filename: filename,
-      contentType: 'image/jpeg',
-    });
-    formData.append('folder', 'plants');
-
-    console.log('Uploading file:', filename, 'to folder: plants');
-    
-    try {
-      const uploadResponse = await axios.post(
-        `${config.STRAPI_CONFIG.apiUrl}/api/upload`,
-        formData,
-        {
-          headers: {
-            'Authorization': `Bearer ${config.STRAPI_CONFIG.apiToken}`,
-            ...formData.getHeaders()
-          }
-        }
-      );
-
-      if (!uploadResponse.data || !Array.isArray(uploadResponse.data)) {
-        throw new Error('Invalid upload response from Strapi');
-      }
-
-      const uploadedFile = uploadResponse.data[0];
-      if (!uploadedFile || !uploadedFile.id) {
-        throw new Error('No file ID received from Strapi');
-      }
-
-      console.log('File successfully uploaded with ID:', uploadedFile.id);
-      session.imageId = uploadedFile.id;
-
-      // Start image analysis in background
-      analyzeImage(msg.chat.id, session, uploadedFile.url)
-        .catch(error => console.error('Image analysis error:', error));
-
-      // Set state and ask for location ONCE
-      session.state = STATES.WAITING_FOR_LOCATION;
-      await askForLocation(msg.chat.id);
-
-    } catch (error) {
-      console.error('Detailed upload error:', error);
-      throw new Error(`Failed to upload image: ${error.message}`);
-    }
-  }
-
-  // New separate function for image analysis
-  async function analyzeImage(chatId, session, imageUrl) {
-    try {
-      console.log('Starting image analysis for:', imageUrl);
-      
-      // Fetch the image data
-      const imageResponse = await axios.get(imageUrl, { responseType: 'arraybuffer' });
-      const imageData = Buffer.from(imageResponse.data);
-      
-      // Initialize Gemini model with the new version
-      const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-      
-      // Prepare the image data
-      const imagePart = {
-        inlineData: {
-          data: imageData.toString('base64'),
-          mimeType: 'image/jpeg'
-        }
-      };
-      
-      // Generate content with the base64 image
-      const result = await model.generateContent([
-        imagePart,
-        'Analyze this plant image. Describe what you see in 2-3 short sentences, focusing on the plant\'s appearance, condition, and notable features.'
-      ]);
-      
-      const response = await result.response;
-      session.imageAnalysis = response.text();
-      console.log('Analysis complete:', session.imageAnalysis);
-      
-    } catch (error) {
-      console.error('Analysis error:', error);
-      session.imageAnalysis = 'Image analysis failed: ' + error.message;
-      throw error;
-    }
   }
 
   async function handleLocation(msg, session) {
     const { latitude, longitude } = msg.location;
     session.location = { latitude, longitude };
 
-    // Save to Strapi
+    if (!session.userId) {
+      throw new Error('No user ID found in session');
+    }
+
+    // Save to Strapi using session's userId
     await saveToStrapi({
       plantName: session.plantName,
       imageId: session.imageId,
       imageAnalysis: session.imageAnalysis,
       latitude,
       longitude,
-      userId: msg.from.id,
-      phoneNumber: session.phoneNumber
+      phoneNumber: session.phoneNumber,
+      userId: session.userId
     });
-  }
-
-  async function sendSummary(chatId, session) {
-    let message = 
-      `✅ Entry Complete!\n\n` +
-      `🌿 Plant: ${session.plantName}\n` +
-      `📍 Location: ${session.location.latitude}, ${session.location.longitude}\n\n`;
-
-    // Only add analysis if it exists
-    if (session.imageAnalysis) {
-      message += `Analysis:\n${session.imageAnalysis}\n\n`;
-    }
-
-    message += `Send /start to document another plant!`;
-
-    await bot.sendMessage(chatId, message, {
-      reply_markup: {
-        remove_keyboard: true
-      }
-    });
-  }
-
-  async function saveToStrapi(data) {
-    try {
-      const response = await axios.post(
-        `${config.STRAPI_CONFIG.apiUrl}/api/location-trackings`,
-        {
-          data: {
-            label: data.plantName,
-            plant_image: data.imageId,
-            analysis: data.imageAnalysis,
-            latitude: data.latitude,
-            longitude: data.longitude,
-            last_verified: new Date().toISOString(),
-            phone_number: data.phoneNumber
-          }
-        },
-        {
-          headers: {
-            'Authorization': `Bearer ${config.STRAPI_CONFIG.apiToken}`,
-            'Content-Type': 'application/json'
-          }
-        }
-      );
-      return response.data;
-    } catch (error) {
-      console.error('Error saving to Strapi:', error.response?.data || error.message);
-      throw new Error('Failed to save plant data to database');
-    }
   }
 
   // Cancel command handler
   bot.onText(/\/cancel/, (msg) => {
     const chatId = msg.chat.id;
-    initSession(chatId);
+    initSession(chatId, userSessions, STATES);
     bot.sendMessage(chatId, 'Operation cancelled. Send /start to begin again.');
   });
 
