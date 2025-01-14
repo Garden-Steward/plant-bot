@@ -1,6 +1,17 @@
 const axios = require('axios');
 const config = require('../config');
 const FormData = require('form-data');
+const client = require('../api');
+
+// Add this helper function at the top with other constants
+const MAINTENANCE_MESSAGE = "🛠️ The service is temporarily undergoing maintenance. Please try again later. We apologize for the inconvenience.";
+
+function isConnectionError(error) {
+  return error.code === 'ECONNREFUSED' || 
+         error.code === 'ECONNRESET' || 
+         error.code === 'ETIMEDOUT' ||
+         error.message.includes('connect');
+}
 
 // Image handling and analysis
 async function analyzeImage(session, imageUrl) {
@@ -38,30 +49,24 @@ async function analyzeImage(session, imageUrl) {
 // Strapi interactions
 async function saveToStrapi(data) {
   try {
-    const response = await axios.post(
-      `${config.STRAPI_CONFIG.apiUrl}/api/location-trackings`,
-      {
-        data: {
-          label: data.plantName,
-          plant_image: data.imageId,
-          analysis: data.imageAnalysis,
-          latitude: data.latitude,
-          longitude: data.longitude,
-          last_verified: new Date().toISOString(),
-          phone_number: data.phoneNumber,
-          user: data.userId
-        }
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${config.STRAPI_CONFIG.apiToken}`,
-          'Content-Type': 'application/json'
-        }
+    const response = await client.post('/api/location-trackings', {
+      data: {
+        label: data.plantName,
+        plant_image: data.imageId,
+        analysis: data.imageAnalysis,
+        latitude: data.latitude,
+        longitude: data.longitude,
+        last_verified: new Date().toISOString(),
+        phone_number: data.phoneNumber,
+        user: data.userId
       }
-    );
+    });
     return response.data;
   } catch (error) {
-    console.error('Error saving to Strapi:', error.response?.data || error.message);
+    console.error('Error saving to Strapi:', error);
+    if (isConnectionError(error)) {
+      throw new Error(MAINTENANCE_MESSAGE);
+    }
     throw new Error('Failed to save plant data to database');
   }
 }
@@ -135,12 +140,11 @@ async function handlePhotoUpload(msg, session, bot, config) {
   console.log('Uploading file:', filename, 'to folder: plants');
   
   try {
-    const uploadResponse = await axios.post(
-      `${config.STRAPI_CONFIG.apiUrl}/api/upload`,
+    const uploadResponse = await client.post(
+      '/api/upload',
       formData,
       {
         headers: {
-          'Authorization': `Bearer ${config.STRAPI_CONFIG.apiToken}`,
           ...formData.getHeaders()
         }
       }
@@ -163,6 +167,9 @@ async function handlePhotoUpload(msg, session, bot, config) {
 
   } catch (error) {
     console.error('Detailed upload error:', error);
+    if (isConnectionError(error)) {
+      throw new Error(MAINTENANCE_MESSAGE);
+    }
     throw new Error(`Failed to upload image: ${error.message}`);
   }
 }
@@ -178,89 +185,68 @@ async function removeKeyboard(bot, chatId, message = 'Keyboard removed') {
 
 async function findUserByChatId(chatId) {
   try {
-    const response = await axios.get(
-      `${config.STRAPI_CONFIG.apiUrl}/api/users`,
-      {
-        params: {
-          filters: {
-            chatId: {
-              $eq: chatId
-            }
+    const response = await client.get('/api/users', {
+      params: {
+        filters: {
+          chatId: {
+            $eq: chatId
           }
-        },
-        headers: {
-          'Authorization': `Bearer ${config.STRAPI_CONFIG.apiToken}`,
         }
       }
-    );
+    });
     
-    console.log('Strapi user response:', response.data); // Debug log
-    
-    // Check if we have data and it has the expected structure
     if (response.data && Array.isArray(response.data)) {
       return response.data[0] || null;
     }
-    
     return null;
   } catch (error) {
-    console.error('Error finding user:', error.response?.data || error.message);
-    return null;
+    console.error('Error finding user');
+    if (isConnectionError(error)) {
+      throw new Error(MAINTENANCE_MESSAGE);
+    }
+    throw error;
   }
 }
 
 async function findUserByPhone(phoneNumber) {
   try {
-    // Ensure phone number starts with '+'
     const formattedPhone = phoneNumber.startsWith('+') ? phoneNumber : `+${phoneNumber}`;
-    
-    const response = await axios.get(
-      `${config.STRAPI_CONFIG.apiUrl}/api/users`,
-      {
-        params: {
-          filters: {
-            phoneNumber: {
-              $eq: formattedPhone
-            }
+    const response = await client.get('/api/users', {
+      params: {
+        filters: {
+          phoneNumber: {
+            $eq: formattedPhone
           }
-        },
-        headers: {
-          'Authorization': `Bearer ${config.STRAPI_CONFIG.apiToken}`,
         }
       }
-    );
-    
-    console.log('Strapi phone lookup response:', response.data);
+    });
     
     if (response.data && Array.isArray(response.data)) {
       return response.data[0] || null;
     }
-    
     return null;
   } catch (error) {
-    console.error('Error finding user by phone:', error.response?.data || error.message);
-    return null;
+    console.error('Error finding user by phone:');
+    if (isConnectionError(error)) {
+      throw new Error(MAINTENANCE_MESSAGE);
+    }
+    throw error;
   }
 }
 
 async function updateUserChatId(userId, chatId) {
   try {
-    const response = await axios.put(
-      `${config.STRAPI_CONFIG.apiUrl}/api/users/${userId}`,
-      {
-        chatId: chatId.toString() // Ensure chatId is stored as string
-      },
-      {
-        headers: {
-          'Authorization': `Bearer ${config.STRAPI_CONFIG.apiToken}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
+    const response = await client.put(`/api/users/${userId}`, {
+      chatId: chatId.toString()
+    });
     
     console.log('Updated user chatId:', response.data);
     return response.data;
   } catch (error) {
-    console.error('Error updating user chatId:', error.response?.data || error.message);
+    console.error('Error updating user chatId:', error);
+    if (isConnectionError(error)) {
+      throw new Error(MAINTENANCE_MESSAGE);
+    }
     throw error;
   }
 }

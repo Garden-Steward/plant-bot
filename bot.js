@@ -199,8 +199,9 @@ function startBot() {
         console.log(`Found existing user for chatId: ${chatId}`);
         session.phoneNumber = existingUser.phoneNumber;
         session.userId = existingUser.id;
+        session.username = existingUser.username;
         session.state = STATES.WAITING_FOR_PLANT_NAME;
-        await askForPlantName(chatId);
+        await askForPlantName(chatId, session);
       } else {
         console.log(`No user found for chatId: ${chatId}, asking for phone`);
         await askForPhone(chatId);
@@ -243,9 +244,10 @@ function startBot() {
                 }
                 
                 session.phoneNumber = phoneNumber;
-                session.userId = existingUser.id;  // Store userId in session
+                session.userId = existingUser.id;
+                session.username = existingUser.username;
                 session.state = STATES.WAITING_FOR_PLANT_NAME;
-                await askForPlantName(chatId);
+                await askForPlantName(chatId, session);
               } else {
                 console.log(`No user found with phone: ${phoneNumber}`);
                 await bot.sendMessage(chatId, 'Sorry, I couldn\'t find your account. Please contact support.');
@@ -312,11 +314,10 @@ function startBot() {
   });
 
   // Helper functions
-  async function askForPlantName(chatId) {
-    const session = userSessions.get(chatId);
+  async function askForPlantName(chatId, session) {
     session.state = STATES.WAITING_FOR_PLANT_NAME;
     await bot.sendMessage(chatId, 
-      'Let\'s start! What is the name of the plant you\'re documenting?\n\n' +
+      'Hi ' + session.username + '! Let\'s get started. What is the name of the plant you\'re documenting?\n\n' +
       'You can use /cancel at any time to start over.'
     );
   }
