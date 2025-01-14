@@ -11,6 +11,7 @@ process.on('unhandledRejection', (error) => {
 const TelegramBot = require('node-telegram-bot-api');
 const config = require('./config');
 const { 
+  STATES,
   analyzeImage, 
   saveToStrapi, 
   initSession, 
@@ -18,7 +19,10 @@ const {
   handlePhotoUpload,
   findUserByChatId,
   findUserByPhone,
-  updateUserChatId
+  updateUserChatId,
+  sendCommandOptions,
+  askForPlantName,
+  handleLocation
 } = require('./helpers/botHelpers');
 
 // At the top after requires
@@ -48,16 +52,6 @@ const userSessions = new Map();
 
 // In-memory storage (consider using Redis/DB for production)
 const userPhoneNumbers = new Map();
-
-// Session states
-const STATES = {
-  IDLE: 'IDLE',
-  WAITING_FOR_PLANT_NAME: 'WAITING_FOR_PLANT_NAME',
-  WAITING_FOR_IMAGE: 'WAITING_FOR_IMAGE',
-  WAITING_FOR_LOCATION: 'WAITING_FOR_LOCATION',
-  WAITING_FOR_PHONE: 'WAITING_FOR_PHONE'
-};
-
 
 // Add at the top level, after middleware setup
 app.use((req, res, next) => {
@@ -201,7 +195,7 @@ function startBot() {
         session.userId = existingUser.id;
         session.username = existingUser.username;
         session.state = STATES.WAITING_FOR_PLANT_NAME;
-        await askForPlantName(chatId, session);
+        await askForPlantName(chatId, session, bot);
       } else {
         console.log(`No user found for chatId: ${chatId}, asking for phone`);
         await askForPhone(chatId);
@@ -209,6 +203,58 @@ function startBot() {
     } catch (error) {
       console.error('Error checking user:', error);
       await bot.sendMessage(chatId, 'An error occurred. Please try again later.');
+    }
+  });
+
+  bot.onText(/\/newplanting/, async (msg) => {
+    console.log('Received /newplanting command from:', msg.chat.id);
+    const chatId = msg.chat.id;
+    const session = initSession(chatId, userSessions, STATES);
+    session.isNewPlanting = true;
+    
+    try {
+      const existingUser = await findUserByChatId(chatId);
+      
+      if (existingUser) {
+        console.log(`Found existing user for chatId: ${chatId}`);
+        session.phoneNumber = existingUser.phoneNumber;
+        session.userId = existingUser.id;
+        session.username = existingUser.username;
+        session.state = STATES.WAITING_FOR_PLANT_NAME;
+        await askForPlantName(chatId, session, bot);
+      } else {
+        console.log(`No user found for chatId: ${chatId}, asking for phone`);
+        await askForPhone(chatId);
+      }
+    } catch (error) {
+      console.error('Error checking user:', error);
+      await bot.sendMessage(chatId, error.message);
+    }
+  });
+
+  bot.onText(/\/addplant/, async (msg) => {
+    console.log('Received /addplant command from:', msg.chat.id);
+    const chatId = msg.chat.id;
+    const session = initSession(chatId, userSessions, STATES);
+    session.isNewPlanting = false;
+    
+    try {
+      const existingUser = await findUserByChatId(chatId);
+      
+      if (existingUser) {
+        console.log(`Found existing user for chatId: ${chatId}`);
+        session.phoneNumber = existingUser.phoneNumber;
+        session.userId = existingUser.id;
+        session.username = existingUser.username;
+        session.state = STATES.WAITING_FOR_PLANT_NAME;
+        await askForPlantName(chatId, session, bot);
+      } else {
+        console.log(`No user found for chatId: ${chatId}, asking for phone`);
+        await askForPhone(chatId);
+      }
+    } catch (error) {
+      console.error('Error checking user:', error);
+      await bot.sendMessage(chatId, error.message);
     }
   });
 
@@ -247,7 +293,7 @@ function startBot() {
                 session.userId = existingUser.id;
                 session.username = existingUser.username;
                 session.state = STATES.WAITING_FOR_PLANT_NAME;
-                await askForPlantName(chatId, session);
+                await askForPlantName(chatId, session, bot);
               } else {
                 console.log(`No user found with phone: ${phoneNumber}`);
                 await bot.sendMessage(chatId, 'Sorry, I couldn\'t find your account. Please contact support.');
@@ -313,15 +359,6 @@ function startBot() {
     await bot.answerCallbackQuery(query.id);
   });
 
-  // Helper functions
-  async function askForPlantName(chatId, session) {
-    session.state = STATES.WAITING_FOR_PLANT_NAME;
-    await bot.sendMessage(chatId, 
-      'Hi ' + session.username + '! Let\'s get started. What is the name of the plant you\'re documenting?\n\n' +
-      'You can use /cancel at any time to start over.'
-    );
-  }
-
   async function askForImage(chatId) {
     await bot.sendMessage(
       chatId,
@@ -366,31 +403,12 @@ function startBot() {
     );
   }
 
-  async function handleLocation(msg, session) {
-    const { latitude, longitude } = msg.location;
-    session.location = { latitude, longitude };
-
-    if (!session.userId) {
-      throw new Error('No user ID found in session');
-    }
-
-    // Save to Strapi using session's userId
-    await saveToStrapi({
-      plantName: session.plantName,
-      imageId: session.imageId,
-      imageAnalysis: session.imageAnalysis,
-      latitude,
-      longitude,
-      phoneNumber: session.phoneNumber,
-      userId: session.userId
-    });
-  }
-
   // Cancel command handler
-  bot.onText(/\/cancel/, (msg) => {
+  bot.onText(/\/cancel/, async (msg) => {
     const chatId = msg.chat.id;
     initSession(chatId, userSessions, STATES);
-    bot.sendMessage(chatId, 'Operation cancelled. Send /start to begin again.');
+    await bot.sendMessage(chatId, 'Operation cancelled.');
+    await sendCommandOptions(bot, chatId);
   });
 
   // Add error handler for the bot

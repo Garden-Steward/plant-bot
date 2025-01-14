@@ -6,6 +6,15 @@ const client = require('../api');
 // Add this helper function at the top with other constants
 const MAINTENANCE_MESSAGE = "🛠️ The service is temporarily undergoing maintenance. Please try again later. We apologize for the inconvenience.";
 
+// Add STATES at the top of the file
+const STATES = {
+  IDLE: 'IDLE',
+  WAITING_FOR_PLANT_NAME: 'WAITING_FOR_PLANT_NAME',
+  WAITING_FOR_IMAGE: 'WAITING_FOR_IMAGE',
+  WAITING_FOR_LOCATION: 'WAITING_FOR_LOCATION',
+  WAITING_FOR_PHONE: 'WAITING_FOR_PHONE'
+};
+
 function isConnectionError(error) {
   return error.code === 'ECONNREFUSED' || 
          error.code === 'ECONNRESET' || 
@@ -49,7 +58,7 @@ async function analyzeImage(session, imageUrl) {
 // Strapi interactions
 async function saveToStrapi(data) {
   try {
-    const response = await client.post('/api/location-trackings', {
+    const payload = {
       data: {
         label: data.plantName,
         plant_image: data.imageId,
@@ -60,7 +69,15 @@ async function saveToStrapi(data) {
         phone_number: data.phoneNumber,
         user: data.userId
       }
-    });
+    };
+
+    // Add planted_date only for new plantings
+    if (data.isNewPlanting) {
+      payload.data.planted_date = new Date().toISOString();
+    }
+    console.log('payload', payload);
+
+    const response = await client.post('/api/location-trackings', payload);
     return response.data;
   } catch (error) {
     console.error('Error saving to Strapi:', error);
@@ -90,7 +107,8 @@ function initSession(chatId, userSessions, STATES) {
     plantName: null,
     imageUrl: null,
     imageAnalysis: null,
-    location: null
+    location: null,
+    isNewPlanting: false
   };
   userSessions.set(chatId, session);
   return session;
@@ -107,7 +125,13 @@ async function sendSummary(bot, chatId, session) {
     message += `Analysis:\n${session.imageAnalysis}\n\n`;
   }
 
-  message += `Send /start to document another plant!`;
+  if (session.isNewPlanting) {
+    message += `📅 Planting Date: ${new Date().toLocaleDateString()}\n\n`;
+  }
+
+  message += `What would you like to do next?\n` +
+             `/newplanting - Document a new planting\n` +
+             `/addplant - Add an existing plant`;
 
   await bot.sendMessage(chatId, message, {
     reply_markup: {
@@ -251,7 +275,52 @@ async function updateUserChatId(userId, chatId) {
   }
 }
 
+// Helper function for command options message
+async function sendCommandOptions(bot, chatId) {
+  const message = 
+    `Choose an option:\n\n` +
+    `/newplanting - Document a new planting\n` +
+    `/addplant - Add an existing plant`;
+  
+  await bot.sendMessage(chatId, message);
+}
+
+// Update askForPlantName to use the local STATES
+async function askForPlantName(chatId, session, bot) {
+  session.state = STATES.WAITING_FOR_PLANT_NAME;
+  const actionType = session.isNewPlanting ? 'planting' : 'documenting';
+  
+  await bot.sendMessage(chatId, 
+    `Hi ${session.username}! Let's get started. What is the name of the plant you're ${actionType}?\n\n` +
+    `You can use /cancel at any time to start over.`
+  );
+}
+
+// Update handleLocation to pass isNewPlanting
+async function handleLocation(msg, session) {
+  const { latitude, longitude } = msg.location;
+  session.location = { latitude, longitude };
+
+  if (!session.userId) {
+    throw new Error('No user ID found in session');
+  }
+
+  // Save to Strapi using session's userId and isNewPlanting flag
+  await saveToStrapi({
+    plantName: session.plantName,
+    imageId: session.imageId,
+    imageAnalysis: session.imageAnalysis,
+    latitude,
+    longitude,
+    phoneNumber: session.phoneNumber,
+    userId: session.userId,
+    isNewPlanting: session.isNewPlanting
+  });
+}
+
+// Export STATES along with other functions
 module.exports = {
+  STATES,
   analyzeImage,
   saveToStrapi,
   initSession,
@@ -260,5 +329,8 @@ module.exports = {
   removeKeyboard,
   findUserByChatId,
   findUserByPhone,
-  updateUserChatId
+  updateUserChatId,
+  sendCommandOptions,
+  askForPlantName,
+  handleLocation
 }; 
