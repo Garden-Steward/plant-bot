@@ -38,19 +38,62 @@ async function analyzeImage(session, imageUrl) {
         mimeType: 'image/jpeg'
       }
     };
-    
-    const result = await model.generateContent([
-      imagePart,
-      'Analyze this plant image. Describe what you see in 2-3 short sentences, focusing on the plant\'s appearance, condition, and notable features.'
-    ]);
-    
+
+    const prompt = `Analyze this image and respond in the following JSON format:
+{
+  "isPlant": boolean,
+  "confidence": "high" | "medium" | "low",
+  "description": "2-3 sentences describing what you see",
+  "plantDetails": {
+    "type": "string describing the type of plant (if applicable)",
+    "health": "description of plant health (if applicable)",
+    "notable_features": "key visual features (if applicable)"
+  }
+}
+
+If the image is not of a plant, set isPlant to false and only fill the description field.
+Keep all descriptions concise and focused on visual elements.`;
+
+    const result = await model.generateContent([imagePart, prompt]);
     const response = await result.response;
-    session.imageAnalysis = response.text();
-    console.log('Analysis complete:', session.imageAnalysis);
+    const analysisText = response.text();
+    
+    console.log('Raw AI response:', analysisText);
+    
+    try {
+      const cleanedText = analysisText.replace(/```json\n?|\n?```/g, '').trim();
+      console.log('Cleaned response:', cleanedText);
+      
+      const analysis = JSON.parse(cleanedText);
+      
+      // Store the analysis results regardless of whether it's a plant
+      session.isPlant = analysis.isPlant;
+      session.confidence = analysis.confidence;
+      
+      if (!analysis.isPlant) {
+        session.imageAnalysis = analysis.description;
+        // Instead of throwing an error, return false to indicate not a plant
+        return false;
+      }
+      
+      // Only set detailed analysis if it is a plant
+      session.imageAnalysis = `${analysis.description}\n\n` +
+        `Type: ${analysis.plantDetails.type}\n` +
+        `Health: ${analysis.plantDetails.health}\n` +
+        `Notable Features: ${analysis.plantDetails.notable_features}`;
+      
+      console.log('Analysis complete:', session.imageAnalysis);
+      return true;
+      
+    } catch (parseError) {
+      console.error('Failed to parse AI response:', parseError);
+      console.error('Response that failed to parse:', analysisText);
+      throw new Error('Failed to analyze the image. Please try again.');
+    }
     
   } catch (error) {
     console.error('Analysis error:', error);
-    session.imageAnalysis = 'Image analysis failed: ' + error.message;
+    session.imageAnalysis = error.message;
     throw error;
   }
 }
@@ -67,7 +110,9 @@ async function saveToStrapi(data) {
         longitude: data.longitude,
         last_verified: new Date().toISOString(),
         phone_number: data.phoneNumber,
-        user: data.userId
+        user: data.userId,
+        is_plant: data.isPlant,
+        confidence: data.confidence
       }
     };
 
@@ -314,7 +359,9 @@ async function handleLocation(msg, session) {
     longitude,
     phoneNumber: session.phoneNumber,
     userId: session.userId,
-    isNewPlanting: session.isNewPlanting
+    isNewPlanting: session.isNewPlanting,
+    isPlant: session.isPlant,
+    confidence: session.confidence
   });
 }
 
