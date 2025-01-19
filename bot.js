@@ -258,12 +258,30 @@ function startBot() {
     }
   });
 
-  // Message handler
+  // Helper function for command options message
+  async function sendCommandOptions(bot, chatId) {
+    const message = 
+      `Choose an option:\n\n` +
+      `/newplanting - Document a new planting\n\n` +
+      `/addplant - Add an established plant\n\n` +
+      `/map - View on the map\n\n` +
+      `Use /cancel at any time to start over.`;
+    
+    await bot.sendMessage(chatId, message);
+  }
+
+  // Update the message handler to handle unknown commands/messages
   bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
     const session = userSessions.get(chatId) || initSession(chatId, userSessions, STATES);
 
     try {
+      // If we're in IDLE state and receive an unknown command/message
+      if (session.state === STATES.IDLE && (!msg.text || !msg.text.startsWith('/'))) {
+        await sendCommandOptions(bot, chatId);
+        return;
+      }
+
       // console.log(`Processing message in state: ${session.state}`);
       switch (session.state) {
         case STATES.IDLE:
@@ -418,6 +436,40 @@ function startBot() {
 
   bot.on('polling_error', (error) => {
     console.error('Polling error:', error);
+  });
+
+  bot.onText(/\/map/, async (msg) => {
+    console.log('Received /map command from:', msg.chat.id);
+    const chatId = msg.chat.id;
+    
+    try {
+      // Create a Google My Maps link
+      const baseUrl = "https://www.google.com/maps/d/u/0/viewer?mid=";
+      const mapId = "1AF_GOZZeEl4gkCOsCWw8taqtH2zAA3U"; // Your custom map ID
+      const mapUrl = `${baseUrl}${mapId}`;
+
+      await bot.sendMessage(
+        chatId,
+        `🗺 View your plants on the map:`,
+        {
+          disable_web_page_preview: false,
+          reply_markup: {
+            inline_keyboard: [
+              [
+                {
+                  text: '🗺 Open Interactive Map',
+                  url: mapUrl
+                }
+              ]
+            ]
+          }
+        }
+      );
+
+    } catch (error) {
+      console.error('Error showing map:', error);
+      await bot.sendMessage(chatId, 'Sorry, I couldn\'t load the map right now. Please try again later.');
+    }
   });
 
   return bot;  // Return the bot instance

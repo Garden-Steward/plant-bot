@@ -15,15 +15,24 @@ const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 // Test the API key on startup
 async function testGeminiAPI() {
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-pro-vision' });
-    console.log('Gemini API initialized successfully');
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    // Actually test the API with a simple prompt
+    const result = await model.generateContent('Test connection');
+    const response = await result.response;
+    console.log('Gemini API initialized and tested successfully');
   } catch (error) {
-    console.error('Failed to initialize Gemini API:', error.message);
-    process.exit(1);
+    console.error('Failed to initialize/test Gemini API:', error.message);
+    // Log the full error for debugging
+    console.error('Full error:', error);
+    // Don't exit process, just warn
+    console.warn('Continuing without Gemini API functionality');
   }
 }
 
-testGeminiAPI();
+// Actually wait for the test to complete
+(async () => {
+  await testGeminiAPI();
+})();
 
 module.exports = {
   TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN,

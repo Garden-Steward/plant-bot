@@ -30,16 +30,17 @@ async function analyzeImage(session, imageUrl) {
     const imageResponse = await axios.get(imageUrl, { responseType: 'arraybuffer' });
     const imageData = Buffer.from(imageResponse.data);
     
-    const model = config.genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-    
-    const imagePart = {
-      inlineData: {
-        data: imageData.toString('base64'),
-        mimeType: 'image/jpeg'
-      }
-    };
+    try {
+      const model = config.genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+      
+      const imagePart = {
+        inlineData: {
+          data: imageData.toString('base64'),
+          mimeType: 'image/jpeg'
+        }
+      };
 
-    const prompt = `Analyze this image and respond in the following JSON format:
+      const prompt = `Analyze this image and respond in the following JSON format:
 {
   "isPlant": boolean,
   "confidence": "high" | "medium" | "low",
@@ -54,47 +55,55 @@ async function analyzeImage(session, imageUrl) {
 If the image is not of a plant, set isPlant to false and only fill the description field.
 Keep all descriptions concise and focused on visual elements.`;
 
-    const result = await model.generateContent([imagePart, prompt]);
-    const response = await result.response;
-    const analysisText = response.text();
-    
-    console.log('Raw AI response:', analysisText);
-    
-    try {
-      const cleanedText = analysisText.replace(/```json\n?|\n?```/g, '').trim();
-      console.log('Cleaned response:', cleanedText);
+      const result = await model.generateContent([imagePart, prompt]);
+      const response = await result.response;
+      const analysisText = response.text();
       
+      const cleanedText = analysisText.replace(/```json\n?|\n?```/g, '').trim();
       const analysis = JSON.parse(cleanedText);
       
-      // Store the analysis results regardless of whether it's a plant
       session.isPlant = analysis.isPlant;
       session.confidence = analysis.confidence;
       
       if (!analysis.isPlant) {
         session.imageAnalysis = analysis.description;
-        // Instead of throwing an error, return false to indicate not a plant
         return false;
       }
       
-      // Only set detailed analysis if it is a plant
       session.imageAnalysis = `${analysis.description}\n\n` +
         `Type: ${analysis.plantDetails.type}\n` +
         `Health: ${analysis.plantDetails.health}\n` +
         `Notable Features: ${analysis.plantDetails.notable_features}`;
       
-      console.log('Analysis complete:', session.imageAnalysis);
       return true;
+
+    } catch (aiError) {
+      console.error('AI Analysis failed:', aiError);
       
-    } catch (parseError) {
-      console.error('Failed to parse AI response:', parseError);
-      console.error('Response that failed to parse:', analysisText);
-      throw new Error('Failed to analyze the image. Please try again.');
+      // Check specifically for API blocked error
+      if (aiError.message && aiError.message.includes('API_KEY_SERVICE_BLOCKED')) {
+        console.log('Gemini API access is blocked - continuing without analysis');
+        session.isPlant = true;
+        session.confidence = 'unverified';
+        session.imageAnalysis = 'AI analysis currently unavailable - image saved';
+      } else {
+        // Handle other AI-related errors
+        session.isPlant = true;
+        session.confidence = 'unknown';
+        session.imageAnalysis = 'Image analysis failed - please try again later';
+      }
+      
+      return true;
     }
     
   } catch (error) {
-    console.error('Analysis error:', error);
-    session.imageAnalysis = error.message;
-    throw error;
+    console.error('Image processing error:', error);
+    
+    session.isPlant = true;
+    session.confidence = 'unknown';
+    session.imageAnalysis = 'Image processing failed';
+    
+    return true;
   }
 }
 
@@ -174,9 +183,10 @@ async function sendSummary(bot, chatId, session) {
     message += `📅 Planting Date: ${new Date().toLocaleDateString()}\n\n`;
   }
 
-  message += `What would you like to do next?\n` +
-             `/newplanting - Document a new planting\n` +
-             `/addplant - Add an existing plant`;
+  message += `What would you like to do next?\n\n` +
+             `/newplanting - Document a new planting\n\n` +
+             `/addplant - Add an existing plant\n\n` +
+             `/map - View on the map`;
 
   await bot.sendMessage(chatId, message, {
     reply_markup: {
