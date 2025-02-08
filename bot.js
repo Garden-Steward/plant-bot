@@ -12,11 +12,8 @@ const TelegramBot = require('node-telegram-bot-api');
 const config = require('./config');
 const { 
   STATES,
-  analyzeImage, 
-  saveToStrapi, 
   initSession, 
   sendSummary,
-  handlePhotoUpload,
   findUserByChatId,
   findUserByPhone,
   updateUserChatId,
@@ -24,6 +21,8 @@ const {
   askForPlantName,
   handleLocation
 } = require('./helpers/botHelpers');
+
+const { processImage } = require('./helpers/botImages');
 
 // At the top after requires
 console.log('Application starting...');
@@ -71,7 +70,7 @@ app.get('/health', (req, res) => {
 });
 
 // Move bot initialization after isProd is defined
-const bot = startBot();
+startBot();
 
 // Start Express with more detailed logging
 const server = app.listen(PORT, HOST, () => {
@@ -180,21 +179,25 @@ function startBot() {
     console.error('Polling error:', error);
   });
 
-  bot.onText(/\/start/, async (msg) => {
-    console.log('Received /start command from:', msg.chat.id);
+  bot.onText(/\/newplanting/, async (msg) => {
+    console.log('Received /newplanting command from:', msg.chat.id);
     const chatId = msg.chat.id;
-    const session = initSession(chatId, userSessions, STATES);
     
+    // Initialize session without setting state
+    let session = initSession(chatId, userSessions, STATES);
+    session.isNewPlanting = true;
+
     try {
-      // Check if user exists in Strapi
       const existingUser = await findUserByChatId(chatId);
-      
+
       if (existingUser) {
         console.log(`Found existing user for chatId: ${chatId}`);
         session.phoneNumber = existingUser.phoneNumber;
         session.userId = existingUser.id;
         session.username = existingUser.username;
-        session.state = STATES.WAITING_FOR_PLANT_NAME;
+        
+        // Now that session is fully initialized, call askForPlantName
+        console.log('Asking for plant name in newplanting');
         await askForPlantName(chatId, session, bot);
       } else {
         console.log(`No user found for chatId: ${chatId}, asking for phone`);
@@ -203,32 +206,6 @@ function startBot() {
     } catch (error) {
       console.error('Error checking user:', error);
       await bot.sendMessage(chatId, 'An error occurred. Please try again later.');
-    }
-  });
-
-  bot.onText(/\/newplanting/, async (msg) => {
-    console.log('Received /newplanting command from:', msg.chat.id);
-    const chatId = msg.chat.id;
-    const session = initSession(chatId, userSessions, STATES);
-    session.isNewPlanting = true;
-    
-    try {
-      const existingUser = await findUserByChatId(chatId);
-      
-      if (existingUser) {
-        console.log(`Found existing user for chatId: ${chatId}`);
-        session.phoneNumber = existingUser.phoneNumber;
-        session.userId = existingUser.id;
-        session.username = existingUser.username;
-        session.state = STATES.WAITING_FOR_PLANT_NAME;
-        await askForPlantName(chatId, session, bot);
-      } else {
-        console.log(`No user found for chatId: ${chatId}, asking for phone`);
-        await askForPhone(chatId);
-      }
-    } catch (error) {
-      console.error('Error checking user:', error);
-      await bot.sendMessage(chatId, error.message);
     }
   });
 
@@ -258,31 +235,54 @@ function startBot() {
     }
   });
 
-  // Helper function for command options message
-  async function sendCommandOptions(bot, chatId) {
-    const message = 
-      `Choose an option:\n\n` +
-      `/newplanting - Document a new planting\n\n` +
-      `/addplant - Add an established plant\n\n` +
-      `/map - View on the map\n\n` +
-      `Use /cancel at any time to start over.`;
-    
-    await bot.sendMessage(chatId, message);
-  }
-
   // Update the message handler to handle unknown commands/messages
   bot.on('message', async (msg) => {
     const chatId = msg.chat.id;
-    const session = userSessions.get(chatId) || initSession(chatId, userSessions, STATES);
+    let session = userSessions.get(chatId) || initSession(chatId, userSessions, STATES);
+
+    if (msg.text === '/cancel') {
+      // Reset the session on cancel
+      session = initSession(chatId, userSessions, STATES);
+      await bot.sendMessage(chatId, 'Session cancelled. You can start again with /newplanting or /addplant.');
+      return;
+    }
+
+    // Handle replace and keep commands
+    if (session.pendingLocationImageId) {
+      if (msg.text === '/replace') {
+        session.locationImageId = session.pendingLocationImageId;
+        session.pendingLocationImageId = null;
+        await bot.sendMessage(chatId, 'Location image replaced successfully. ' + 
+        (!session.closeImageId ? ' Send us a close-up image next!' : ''));
+      } else if (msg.text === '/keep') {
+        session.pendingLocationImageId = null;
+        await bot.sendMessage(chatId, 'Keeping the existing location image. ' + 
+        (!session.closeImageId ? ' Send us a close-up image next!' : ''));
+      }
+      return;
+    }
 
     try {
+      // Check for image at any state
+      if (msg.photo) {
+        await processImage(msg, session, bot, config);
+        
+        // Continue processing the message after handling the photo
+        if (session.state === STATES.WAITING_FOR_PLANT_NAME) {
+          await askForPlantName(chatId, session, bot);
+        } else if (session.state === STATES.WAITING_FOR_IMAGE) {
+          if (session.closeImageId && session.locationImageId) {
+            session.state = STATES.WAITING_FOR_LOCATION;
+          }
+        }
+      }
+
       // If we're in IDLE state and receive an unknown command/message
       if (session.state === STATES.IDLE && (!msg.text || !msg.text.startsWith('/'))) {
         await sendCommandOptions(bot, chatId);
         return;
       }
 
-      // console.log(`Processing message in state: ${session.state}`);
       switch (session.state) {
         case STATES.IDLE:
           if (msg.contact && msg.contact.phone_number) {
@@ -329,19 +329,21 @@ function startBot() {
           if (msg.text && msg.text !== '/start' && msg.text !== '/cancel') {
             session.plantName = msg.text;
             session.state = STATES.WAITING_FOR_IMAGE;
-            await askForImage(chatId);
+            if (!session.imageReceived) { // Only ask for image if not received
+              await askForImage(chatId);
+            } else {
+              session.state = STATES.WAITING_FOR_LOCATION; // Skip to next state
+              await askForLocation(chatId);
+            }
           }
           break;
 
         case STATES.WAITING_FOR_IMAGE:
-          if (msg.photo) {
-            const { fileId, fileUrl } = await handlePhotoUpload(msg, session, bot, config);
-            session.imageId = fileId;
-            await analyzeImage(session, fileUrl);
-            session.state = STATES.WAITING_FOR_LOCATION;
-            await askForLocation(chatId);
-          } else if (msg.text !== '/cancel') {
+          if (!session.imageReceived) {
             await bot.sendMessage(chatId, 'Please send a photo of the plant.');
+          } else {
+            session.state = STATES.WAITING_FOR_LOCATION; // Skip to next state
+            await askForLocation(chatId);
           }
           break;
 
@@ -380,7 +382,7 @@ function startBot() {
   async function askForImage(chatId) {
     await bot.sendMessage(
       chatId,
-      'Great! Now please send me a photo of the plant.'
+      'Great! Now please send me a close-up and a distance shot of the plant.'
     );
   }
 
@@ -425,7 +427,6 @@ function startBot() {
   bot.onText(/\/cancel/, async (msg) => {
     const chatId = msg.chat.id;
     initSession(chatId, userSessions, STATES);
-    await bot.sendMessage(chatId, 'Operation cancelled.');
     await sendCommandOptions(bot, chatId);
   });
 
