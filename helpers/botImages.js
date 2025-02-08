@@ -65,12 +65,12 @@ async function processImage(msg, session, bot, config) {
   const { fileId, fileUrl } = await handlePhotoUpload(msg, session, bot, config);
   const analysis = await analyzeImage(session, fileUrl);
 
-  if (analysis.plantDetails?.close_up) {
+  if (analysis.plantDetails?.close_up && session.isPlant) {
     session.closeImageId = fileId;
     session.imageAnalysis = analysis.description;
     await bot.sendMessage(msg.chat.id, 'Close-up image received and processed.' + 
       (!session.locationImageId ? ' Send us a distance shot next so we can understand the location of the plant better!' : ''));
-  } else if (analysis.plantDetails?.distance_shot) {
+  } else if (analysis.plantDetails?.distance_shot && session.isPlant) {
     if (session.locationImageId) {
       session.pendingLocationImageId = fileId;
       await bot.sendMessage(msg.chat.id, 'You already have a distance shot uploaded. Would you like to replace it with this new image? Reply with "/replace" or "/keep".');
