@@ -135,10 +135,6 @@ function startBot() {
     // Add webhook route with explicit logging
     console.log('Registering webhook route:', webhookPath);
     app.post(webhookPath, (req, res) => {
-      console.log('⚡️ Webhook hit:', {
-        path: req.path,
-        body: JSON.stringify(req.body, null, 2)
-      });
       
       try {
         bot.processUpdate(req.body);

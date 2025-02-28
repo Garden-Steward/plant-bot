@@ -98,9 +98,9 @@ async function sendSummary(bot, chatId, session) {
   }
 
   message += `What would you like to do next?\n\n` +
-             `/newplanting - Document a new planting\n\n` +
-             `/addplant - Add an existing plant\n\n` +
-             `/map - View on the map`;
+  `/addplant - Add an existing plant\n\n` +
+  `/newplanting - Document a new planting\n\n` +  
+  `/map - View on the map`;
 
   await bot.sendMessage(chatId, message, {
     reply_markup: {
@@ -190,8 +190,8 @@ async function updateUserChatId(userId, chatId) {
   async function sendCommandOptions(bot, chatId) {
     const message = 
       `Choose an option:\n\n` +
-      `/newplanting - Document a new planting\n\n` +
       `/addplant - Add an established plant\n\n` +
+      `/newplanting - Document a new planting\n\n` +
       `/map - View on the map\n\n` +
       `Use /cancel at any time to start over.`;
     

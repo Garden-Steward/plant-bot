@@ -127,20 +127,17 @@ Keep all descriptions concise and focused on visual elements.`;
       const cleanedText = analysisText.replace(/```json\n?|\n?```/g, '').trim();
       const analysis = JSON.parse(cleanedText);
       
-      session.isPlant = analysis.isPlant;
-      session.confidence = analysis.plantDetails.type_confidence;
-      
-      if (!analysis.isPlant) {
-        session.imageAnalysis = analysis.description;
-        return false;
-      }
-      
-      session.imageAnalysis = `${analysis.description}\n\n` +
+      if (analysis.isPlant && analysis.plantDetails.close_up) {
+        session.isPlant = analysis.isPlant;
+        session.confidence = analysis.plantDetails.type_confidence;
+        
+        session.imageAnalysis = `${analysis.description}\n\n` +
         `Type: ${analysis.plantDetails.type}\n` +
         `Health: ${analysis.plantDetails.health}\n` +
         `Notable Features: ${analysis.plantDetails.notable_features}\n` +
         `Close up: ${analysis.plantDetails.close_up}\n` +
         `Distance shot: ${analysis.plantDetails.distance_shot}`;
+      }
       
       return analysis;
 
